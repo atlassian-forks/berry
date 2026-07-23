@@ -1,3 +1,5 @@
+import {Resolution}               from '@yarnpkg/parsers';
+
 import {MessageName}              from './MessageName';
 import {Plugin}                   from './Plugin';
 import {Project}                  from './Project';
@@ -6,10 +8,41 @@ import {Workspace}                from './Workspace';
 import * as structUtils           from './structUtils';
 import {Descriptor, Locator}      from './types';
 
+// Index resolutions by `descriptor.fullName` so `reduceDependency` can look up
+// candidates instead of scanning the whole `resolutions` array per dependency.
+// Memoized by array identity; buckets keep insertion order (first match wins).
+type ResolutionEntry = {pattern: Resolution, reference: string};
+
+const resolutionsIndexCache = new WeakMap<Array<ResolutionEntry>, Map<string, Array<ResolutionEntry>>>();
+
+const getResolutionsIndex = (resolutions: Array<ResolutionEntry>): Map<string, Array<ResolutionEntry>> => {
+  let index = resolutionsIndexCache.get(resolutions);
+  if (typeof index !== `undefined`)
+    return index;
+
+  index = new Map();
+  for (const entry of resolutions) {
+    let bucket = index.get(entry.pattern.descriptor.fullName);
+    if (typeof bucket === `undefined`)
+      index.set(entry.pattern.descriptor.fullName, bucket = []);
+
+    bucket.push(entry);
+  }
+
+  resolutionsIndexCache.set(resolutions, index);
+  return index;
+};
+
 export const CorePlugin: Plugin = {
   hooks: {
     reduceDependency: (dependency: Descriptor, project: Project, locator: Locator, initialDependency: Descriptor, {resolver, resolveOptions}: {resolver: Resolver, resolveOptions: ResolveOptions}) => {
-      for (const {pattern, reference} of project.topLevelWorkspace.manifest.resolutions) {
+      const resolutions = project.topLevelWorkspace.manifest.resolutions;
+
+      const candidates = getResolutionsIndex(resolutions).get(structUtils.stringifyIdent(dependency));
+      if (typeof candidates === `undefined`)
+        return dependency;
+
+      for (const {pattern, reference} of candidates) {
         if (pattern.from) {
           if (pattern.from.fullName !== structUtils.stringifyIdent(locator))
             continue;
@@ -27,9 +60,6 @@ export const CorePlugin: Plugin = {
         }
 
         /* All `resolutions` field entries have a descriptor*/ {
-          if (pattern.descriptor.fullName !== structUtils.stringifyIdent(dependency))
-            continue;
-
           const normalizedDescriptor = project.configuration.normalizeDependency(
             structUtils.makeDescriptor(
               structUtils.parseLocator(pattern.descriptor.fullName),
