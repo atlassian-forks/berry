@@ -56,8 +56,20 @@ const TRAILING_SLASH_REGEXP = /\/$/;
 
 const FETCHER_CONCURRENCY = 32;
 
-const gzip = promisify(zlib.gzip);
-const gunzip = promisify(zlib.gunzip);
+// zstd (level 1) install-state compression: faster and smaller than gzip.
+// Requires Node >=22; resolved lazily so `zlib.zstd*` isn't referenced at load
+// on older Node. Cast because the pinned @types/node lacks the zstd typings.
+const zlibZstd = zlib as unknown as {
+  zstdCompress: typeof zlib.gzip;
+  zstdDecompress: typeof zlib.gunzip;
+  constants: {ZSTD_c_compressionLevel: number};
+};
+const compress = (data: Buffer): Promise<Buffer> =>
+  promisify(zlibZstd.zstdCompress)(data, {
+    params: {[zlibZstd.constants.ZSTD_c_compressionLevel]: 1},
+  } as any) as Promise<Buffer>;
+const decompress = (data: Buffer): Promise<Buffer> =>
+  promisify(zlibZstd.zstdDecompress)(data) as Promise<Buffer>;
 
 export enum InstallMode {
   /**
@@ -2044,7 +2056,7 @@ export class Project {
     const installStatePath = this.configuration.get(`installStatePath`);
 
     await xfs.mkdirPromise(ppath.dirname(installStatePath), {recursive: true});
-    await xfs.writeFilePromise(installStatePath, await gzip(serializedState) as Buffer);
+    await xfs.writeFilePromise(installStatePath, await compress(serializedState) as Buffer);
 
     this.installStateChecksum = newInstallStateChecksum;
   }
@@ -2054,7 +2066,7 @@ export class Project {
 
     let installState: InstallState;
     try {
-      const installStateBuffer = await gunzip(await xfs.readFilePromise(installStatePath)) as Buffer;
+      const installStateBuffer = await decompress(await xfs.readFilePromise(installStatePath)) as Buffer;
       installState = v8.deserialize(installStateBuffer);
       this.installStateChecksum = hashUtils.makeHash(installStateBuffer);
     } catch {
