@@ -1589,6 +1589,8 @@ export class Project {
       return true;
     };
 
+    const buildLimit = this.configuration.getLimit(`buildConcurrency`);
+
     while (buildablePackages.size > 0) {
       const savedSize = buildablePackages.size;
       const buildPromises: Array<Promise<unknown>> = [];
@@ -1630,7 +1632,7 @@ export class Project {
         else
           report.reportInfo(MessageName.MUST_BUILD, `${structUtils.prettyLocator(this.configuration, pkg)} must be built because it never has been before or the last one failed`);
 
-        const pkgBuilds = buildInfo.buildLocations.map(async location => {
+        const pkgBuilds = buildInfo.buildLocations.map(location => buildLimit(async () => {
           if (!ppath.isAbsolute(location))
             throw new Error(`Assertion failed: Expected the build location to be absolute (not ${location})`);
 
@@ -1702,7 +1704,7 @@ export class Project {
           }
 
           return true;
-        });
+        }));
 
         buildPromises.push(
           ...pkgBuilds,

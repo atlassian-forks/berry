@@ -454,6 +454,11 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     type: SettingsType.NUMBER,
     default: nodeUtils.availableParallelism(),
   },
+  buildConcurrency: {
+    description: `Maximal amount of concurrent package builds`,
+    type: SettingsType.NUMBER,
+    default: nodeUtils.availableParallelism(),
+  },
   taskPoolMode: {
     description: `Execution strategy for heavy tasks`,
     type: SettingsType.STRING,
@@ -710,6 +715,7 @@ export interface ConfigurationValueMap {
   enableStrictSsl: boolean;
   taskPoolConcurrency: number;
   taskPoolMode: string;
+  buildConcurrency: number;
 
   logFilters: Array<miscUtils.ToMapValue<{code?: string, text?: string, pattern?: string, level?: formatUtils.LogLevel | null}>>;
 
