@@ -1,10 +1,10 @@
-import {Cache, Configuration, LocatorHash, Package, Project, ThrowReport, structUtils} from '@yarnpkg/core';
-import {Filename, PortablePath, ppath, xfs}                                            from '@yarnpkg/fslib';
-import LinkPlugin                                                                      from '@yarnpkg/plugin-link';
-import PnpPlugin                                                                       from '@yarnpkg/plugin-pnp';
-import v8                                                                              from 'v8';
+import {Cache, Configuration, LocatorHash, Package, Project, ThrowReport, nodeUtils, structUtils} from '@yarnpkg/core';
+import {Filename, PortablePath, ppath, xfs}                                                       from '@yarnpkg/fslib';
+import LinkPlugin                                                                                 from '@yarnpkg/plugin-link';
+import PnpPlugin                                                                                  from '@yarnpkg/plugin-pnp';
+import v8                                                                                         from 'v8';
 
-import {TestPlugin}                                                                    from './TestPlugin';
+import {TestPlugin}                                                                               from './TestPlugin';
 
 const getConfiguration = (p: PortablePath) => {
   return Configuration.create(p, p, new Map([
@@ -15,6 +15,40 @@ const getConfiguration = (p: PortablePath) => {
 };
 
 describe(`Project`, () => {
+  it(`should default buildConcurrency to the number of available cores`, async () => {
+    await xfs.mktempPromise(async dir => {
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {});
+
+      const configuration = await getConfiguration(dir);
+
+      expect(configuration.get(`buildConcurrency`)).toEqual(nodeUtils.availableParallelism());
+    });
+  });
+
+  it(`should bound concurrent builds to the configured buildConcurrency`, async () => {
+    await xfs.mktempPromise(async dir => {
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {});
+
+      const configuration = await getConfiguration(dir);
+      configuration.use(`<test>`, {buildConcurrency: `2`}, dir, {overwrite: true});
+
+      let active = 0;
+      let peak = 0;
+      const limit = configuration.getLimit(`buildConcurrency`);
+
+      const task = () => limit(async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 5));
+        active -= 1;
+      });
+
+      await Promise.all(Array.from({length: 10}, () => task()));
+
+      expect(peak).toBeLessThanOrEqual(2);
+    });
+  });
+
   it(`should resolve virtual links during 'resolveEverything'`, async () => {
     await xfs.mktempPromise(async dir => {
       await xfs.mkdirpPromise(ppath.join(dir, `foo`));
