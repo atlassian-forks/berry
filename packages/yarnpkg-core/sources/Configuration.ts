@@ -457,7 +457,7 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
   buildConcurrency: {
     description: `Maximal amount of concurrent package builds`,
     type: SettingsType.NUMBER,
-    default: nodeUtils.availableParallelism(),
+    default: 4,
   },
   taskPoolMode: {
     description: `Execution strategy for heavy tasks`,

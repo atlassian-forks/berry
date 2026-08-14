@@ -1,10 +1,10 @@
-import {Cache, Configuration, LocatorHash, Package, Project, ThrowReport, nodeUtils, structUtils} from '@yarnpkg/core';
-import {Filename, PortablePath, ppath, xfs}                                                       from '@yarnpkg/fslib';
-import LinkPlugin                                                                                 from '@yarnpkg/plugin-link';
-import PnpPlugin                                                                                  from '@yarnpkg/plugin-pnp';
-import v8                                                                                         from 'v8';
+import {Cache, Configuration, LocatorHash, Package, Project, ThrowReport, structUtils} from '@yarnpkg/core';
+import {Filename, PortablePath, ppath, xfs}                                            from '@yarnpkg/fslib';
+import LinkPlugin                                                                      from '@yarnpkg/plugin-link';
+import PnpPlugin                                                                       from '@yarnpkg/plugin-pnp';
+import v8                                                                              from 'v8';
 
-import {TestPlugin}                                                                               from './TestPlugin';
+import {TestPlugin}                                                                    from './TestPlugin';
 
 const getConfiguration = (p: PortablePath) => {
   return Configuration.create(p, p, new Map([
@@ -15,13 +15,13 @@ const getConfiguration = (p: PortablePath) => {
 };
 
 describe(`Project`, () => {
-  it(`should default buildConcurrency to the number of available cores`, async () => {
+  it(`should default buildConcurrency to 4`, async () => {
     await xfs.mktempPromise(async dir => {
       await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {});
 
       const configuration = await getConfiguration(dir);
 
-      expect(configuration.get(`buildConcurrency`)).toEqual(nodeUtils.availableParallelism());
+      expect(configuration.get(`buildConcurrency`)).toEqual(4);
     });
   });
 
