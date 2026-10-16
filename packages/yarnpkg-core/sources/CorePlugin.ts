@@ -10,17 +10,27 @@ import {Descriptor, Locator}      from './types';
 
 // Index resolutions by `descriptor.fullName` so `reduceDependency` can look up
 // candidates instead of scanning the whole `resolutions` array per dependency.
-// Memoized by array identity; buckets keep insertion order (first match wins).
+// Buckets keep insertion order (first match wins).
+//
+// The `resolutions` array is mutable: plugins (e.g. focus-style commands) may
+// push entries into it in place between two installs on the same Project. The
+// index is therefore dropped at the start of every resolution pass (see
+// `invalidateResolutionsIndex`), and rebuilt if the array length changes.
 type ResolutionEntry = {pattern: Resolution, reference: string};
+type ResolutionsIndex = {length: number, index: Map<string, Array<ResolutionEntry>>};
 
-const resolutionsIndexCache = new WeakMap<Array<ResolutionEntry>, Map<string, Array<ResolutionEntry>>>();
+const resolutionsIndexCache = new WeakMap<Array<ResolutionEntry>, ResolutionsIndex>();
+
+export const invalidateResolutionsIndex = (resolutions: Array<ResolutionEntry>) => {
+  resolutionsIndexCache.delete(resolutions);
+};
 
 const getResolutionsIndex = (resolutions: Array<ResolutionEntry>): Map<string, Array<ResolutionEntry>> => {
-  let index = resolutionsIndexCache.get(resolutions);
-  if (typeof index !== `undefined`)
-    return index;
+  const cached = resolutionsIndexCache.get(resolutions);
+  if (typeof cached !== `undefined` && cached.length === resolutions.length)
+    return cached.index;
 
-  index = new Map();
+  const index = new Map<string, Array<ResolutionEntry>>();
   for (const entry of resolutions) {
     let bucket = index.get(entry.pattern.descriptor.fullName);
     if (typeof bucket === `undefined`)
@@ -29,7 +39,7 @@ const getResolutionsIndex = (resolutions: Array<ResolutionEntry>): Map<string, A
     bucket.push(entry);
   }
 
-  resolutionsIndexCache.set(resolutions, index);
+  resolutionsIndexCache.set(resolutions, {length: resolutions.length, index});
   return index;
 };
 
