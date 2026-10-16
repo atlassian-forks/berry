@@ -14,6 +14,7 @@ import zlib                                                             from 'zl
 
 import {Cache, CacheOptions}                                            from './Cache';
 import {Configuration}                                                  from './Configuration';
+import {invalidateResolutionsIndex}                                     from './CorePlugin';
 import {Fetcher, FetchOptions}                                          from './Fetcher';
 import {Installer, BuildDirective, BuildDirectiveType, InstallStatus}   from './Installer';
 import {LegacyMigrationResolver}                                        from './LegacyMigrationResolver';
@@ -788,6 +789,9 @@ export class Project {
 
     // Reverts the changes that have been applied to the tree because of any previous virtual resolution pass
     this.forgetVirtualResolutions();
+
+    // Plugins may have mutated the top-level `resolutions` since the last pass
+    invalidateResolutionsIndex(this.topLevelWorkspace.manifest.resolutions);
 
     // Keep a copy of the original packages so that we can figure out what was added / removed later
     const initialPackages = new Map(this.originalPackages);
