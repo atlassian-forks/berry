@@ -14,6 +14,7 @@ import zlib                                                             from 'zl
 
 import {Cache, CacheOptions}                                            from './Cache';
 import {Configuration}                                                  from './Configuration';
+import {invalidateResolutionsIndex}                                     from './CorePlugin';
 import {Fetcher, FetchOptions}                                          from './Fetcher';
 import {Installer, BuildDirective, BuildDirectiveType, InstallStatus}   from './Installer';
 import {LegacyMigrationResolver}                                        from './LegacyMigrationResolver';
@@ -59,8 +60,20 @@ const TRAILING_SLASH_REGEXP = /\/$/;
 
 const FETCHER_CONCURRENCY = 32;
 
-const gzip = promisify(zlib.gzip);
-const gunzip = promisify(zlib.gunzip);
+// zstd (level 1) install-state compression: faster and smaller than gzip.
+// Requires Node >=22; resolved lazily so `zlib.zstd*` isn't referenced at load
+// on older Node. Cast because the pinned @types/node lacks the zstd typings.
+const zlibZstd = zlib as unknown as {
+  zstdCompress: typeof zlib.gzip;
+  zstdDecompress: typeof zlib.gunzip;
+  constants: {ZSTD_c_compressionLevel: number};
+};
+const compress = (data: Buffer): Promise<Buffer> =>
+  promisify(zlibZstd.zstdCompress)(data, {
+    params: {[zlibZstd.constants.ZSTD_c_compressionLevel]: 1},
+  } as any) as Promise<Buffer>;
+const decompress = (data: Buffer): Promise<Buffer> =>
+  promisify(zlibZstd.zstdDecompress)(data) as Promise<Buffer>;
 
 export enum InstallMode {
   /**
@@ -776,6 +789,9 @@ export class Project {
 
     // Reverts the changes that have been applied to the tree because of any previous virtual resolution pass
     this.forgetVirtualResolutions();
+
+    // Plugins may have mutated the top-level `resolutions` since the last pass
+    invalidateResolutionsIndex(this.topLevelWorkspace.manifest.resolutions);
 
     // Keep a copy of the original packages so that we can figure out what was added / removed later
     const initialPackages = new Map(this.originalPackages);
@@ -1579,6 +1595,8 @@ export class Project {
       return true;
     };
 
+    const buildLimit = this.configuration.getLimit(`buildConcurrency`);
+
     while (buildablePackages.size > 0) {
       const savedSize = buildablePackages.size;
       const buildPromises: Array<Promise<unknown>> = [];
@@ -1620,7 +1638,7 @@ export class Project {
         else
           report.reportInfo(MessageName.MUST_BUILD, `${structUtils.prettyLocator(this.configuration, pkg)} must be built because it never has been before or the last one failed`);
 
-        const pkgBuilds = buildInfo.buildLocations.map(async location => {
+        const pkgBuilds = buildInfo.buildLocations.map(location => buildLimit(async () => {
           if (!ppath.isAbsolute(location))
             throw new Error(`Assertion failed: Expected the build location to be absolute (not ${location})`);
 
@@ -1692,7 +1710,7 @@ export class Project {
           }
 
           return true;
-        });
+        }));
 
         buildPromises.push(
           ...pkgBuilds,
@@ -2046,7 +2064,7 @@ export class Project {
     const installStatePath = this.configuration.get(`installStatePath`);
 
     await xfs.mkdirPromise(ppath.dirname(installStatePath), {recursive: true});
-    await xfs.writeFilePromise(installStatePath, await gzip(serializedState) as Buffer);
+    await xfs.writeFilePromise(installStatePath, await compress(serializedState) as Buffer);
 
     this.installStateChecksum = newInstallStateChecksum;
   }
@@ -2056,7 +2074,7 @@ export class Project {
 
     let installState: InstallState;
     try {
-      const installStateBuffer = await gunzip(await xfs.readFilePromise(installStatePath)) as Buffer;
+      const installStateBuffer = await decompress(await xfs.readFilePromise(installStatePath)) as Buffer;
       installState = v8.deserialize(installStateBuffer);
       this.installStateChecksum = hashUtils.makeHash(installStateBuffer);
     } catch {

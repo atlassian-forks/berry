@@ -1357,17 +1357,17 @@ describe(`Node_Modules`, () => {
           },
         });
 
-        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: hardlinks-local\n`);
+        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: hardlinks-local\nnmDirClone: false\n`);
         await run(`install`);
 
         expect(await xfs.statPromise(`${path}/ws3/node_modules/no-deps/package.json` as PortablePath)).toMatchObject({nlink: 2});
 
-        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: classic\n`);
+        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: classic\nnmDirClone: false\n`);
         await run(`install`);
 
         expect(await xfs.statPromise(`${path}/ws3/node_modules/no-deps/package.json` as PortablePath)).toMatchObject({nlink: 1});
 
-        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: hardlinks-local\n`);
+        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: hardlinks-local\nnmDirClone: false\n`);
         await run(`install`);
 
         expect(await xfs.statPromise(`${path}/ws3/node_modules/no-deps/package.json` as PortablePath)).toMatchObject({nlink: 2});

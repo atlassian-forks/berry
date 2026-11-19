@@ -16,6 +16,9 @@ import {UsageError}                                                         from
 import crypto                                                               from 'crypto';
 import fs                                                                   from 'fs';
 
+import {DirCloner, cloneDirInto, ensureDirCloneSlot}                        from './dirClone';
+import {getDirCloneSlot, startDirCloner}                                    from './dirClone';
+
 const STATE_FILE_VERSION = 1;
 const NODE_MODULES = `node_modules` as Filename;
 const DOT_BIN = `.bin` as Filename;
@@ -1088,19 +1091,23 @@ export function getGlobalHardlinksStore(configuration: Configuration): PortableP
   return ppath.join(configuration.get(`globalFolder`), `store` as Filename);
 }
 
+export function getDirCloneStore(configuration: Configuration): PortablePath {
+  return ppath.join(configuration.get(`globalFolder`), `nm-dir-clone` as Filename);
+}
+
+const getLocationPackageRoot = (targetPath: PortablePath): PortablePath => {
+  const parts = targetPath.split(ppath.sep);
+  const nmIndex = parts.lastIndexOf(NODE_MODULES);
+  if (nmIndex < 0 || nmIndex == parts.length - 1)
+    throw new Error(`Assertion failed. Path is outside of any node_modules package ${targetPath}`);
+
+  return parts.slice(0, nmIndex + (parts[nmIndex + 1].startsWith(`@`) ? 3 : 2)).join(ppath.sep) as PortablePath;
+};
+
 /**
  * Mutate binSymlinks by removing binaries related to the changedLocations.
  */
 function invalidateBinSymlinks(binSymlinks: BinSymlinkMap, changedLocations: Set<PortablePath>): void {
-  const getLocationPackageRoot = (targetPath: PortablePath): PortablePath => {
-    const parts = targetPath.split(ppath.sep);
-    const nmIndex = parts.lastIndexOf(NODE_MODULES);
-    if (nmIndex < 0 || nmIndex == parts.length - 1)
-      throw new Error(`Assertion failed. Path is outside of any node_modules package ${targetPath}`);
-
-    return parts.slice(0, nmIndex + (parts[nmIndex + 1].startsWith(`@`) ? 3 : 2)).join(ppath.sep) as PortablePath;
-  };
-
   for (const binSymlinkMap of binSymlinks.values()) {
     for (const [binFile, binLocation] of binSymlinkMap) {
       if (changedLocations.has(getLocationPackageRoot(binLocation))) {
@@ -1123,6 +1130,26 @@ async function persistNodeModules(preinstallState: InstallState, installState: N
   const locationTree = buildLocationTree(installState, {skipPrefix: project.cwd});
 
   const addQueue: Array<Promise<void>> = [];
+  const dirCloneSlots = new Map<PortablePath, PortablePath>();
+  let dirCloneFailed = false;
+
+  // Any failure in the clone path turns it off for the rest of the install, and the package is written the regular way
+  const tryDirClone = async (dstDir: PortablePath, clone: (cloner: DirCloner) => Promise<void>) => {
+    if (dirCloner === null || dirCloneFailed)
+      return false;
+
+    try {
+      await clone(dirCloner);
+      return true;
+    } catch (error) {
+      if (dirCloneSlots.size > 0 && !dirCloneFailed)
+        report.reportWarning(MessageName.UNNAMED, `Falling back to copying packages into node_modules: ${error.message}`);
+      dirCloneFailed = true;
+      await removeDir(dstDir, {contentsOnly: true});
+      return false;
+    }
+  };
+
   const addModule = async ({srcDir, dstDir, linkType, globalHardlinksStore, nmMode, windowsLinkType, packageChecksum}: {srcDir: PortablePath, dstDir: PortablePath, linkType: LinkType, globalHardlinksStore: PortablePath | null, nmMode: {value: NodeModulesMode},  windowsLinkType: WindowsLinkType, packageChecksum: string | null}) => {
     const promise: Promise<any> = (async () => {
       try {
@@ -1130,7 +1157,16 @@ async function persistNodeModules(preinstallState: InstallState, installState: N
           await xfs.mkdirPromise(ppath.dirname(dstDir), {recursive: true});
           await symlinkPromise(ppath.resolve(srcDir), dstDir, windowsLinkType);
         } else {
-          await copyPromise(dstDir, srcDir, {baseFs, globalHardlinksStore, nmMode, windowsLinkType, packageChecksum});
+          const cloned = packageChecksum !== null && await tryDirClone(dstDir, async cloner => {
+            const slot = getDirCloneSlot(getDirCloneStore(project.configuration), packageChecksum);
+            await ensureDirCloneSlot(slot, tmpSlot => copyPromise(tmpSlot, srcDir, {baseFs, globalHardlinksStore: null, nmMode: {value: NodeModulesMode.CLASSIC}, windowsLinkType, packageChecksum: null}));
+            await cloneDirInto(cloner.clone, slot, dstDir);
+            dirCloneSlots.set(srcDir, slot);
+          });
+
+          if (!cloned) {
+            await copyPromise(dstDir, srcDir, {baseFs, globalHardlinksStore, nmMode, windowsLinkType, packageChecksum});
+          }
         }
       } catch (e) {
         e.message = `While persisting ${srcDir} -> ${dstDir} ${e.message}`;
@@ -1145,8 +1181,14 @@ async function persistNodeModules(preinstallState: InstallState, installState: N
     }
   };
 
-  const cloneModule = async (srcDir: PortablePath, dstDir: PortablePath, options: {nmMode: {value: NodeModulesMode}, innerLoop?: boolean}) => {
+  const cloneModule = async (srcDir: PortablePath, dstDir: PortablePath, options: {nmMode: {value: NodeModulesMode}, innerLoop?: boolean, dirCloneSlot?: PortablePath}) => {
     const promise: Promise<any> = (async () => {
+      const {dirCloneSlot} = options;
+      if (dirCloneSlot !== undefined && await tryDirClone(dstDir, cloner => cloneDirInto(cloner.clone, dirCloneSlot, dstDir))) {
+        progress.tick();
+        return;
+      }
+
       const cloneDir = async (srcDir: PortablePath, dstDir: PortablePath, options: {nmMode: {value: NodeModulesMode}, innerLoop?: boolean}) => {
         try {
           if (!options.innerLoop)
@@ -1342,6 +1384,8 @@ async function persistNodeModules(preinstallState: InstallState, installState: N
   const nmModeSetting = project.configuration.get(`nmMode`);
   const nmMode = {value: nmModeSetting};
   const windowsLinkType = project.configuration.get(`winLinkType`) as WindowsLinkType;
+  // Started only when there is something to write; hardlinks-global keeps its store-shared inodes
+  const dirCloner = process.platform === `darwin` && project.configuration.get(`nmDirClone`) && nmModeSetting !== NodeModulesMode.HARDLINKS_GLOBAL && addList.some(({linkType}) => linkType === LinkType.HARD) ? startDirCloner() : null;
 
   try {
     // For the first pass we'll only want to install a single copy for each
@@ -1371,7 +1415,7 @@ async function persistNodeModules(preinstallState: InstallState, installState: N
     for (const entry of addList) {
       const persistedDir = persistedLocations.get(entry.srcDir)!;
       if (entry.linkType !== LinkType.SOFT && entry.dstDir !== persistedDir) {
-        await cloneModule(persistedDir, entry.dstDir, {nmMode});
+        await cloneModule(persistedDir, entry.dstDir, {nmMode, dirCloneSlot: dirCloneSlots.get(entry.srcDir)});
       }
     }
 
@@ -1384,7 +1428,7 @@ async function persistNodeModules(preinstallState: InstallState, installState: N
 
     invalidateBinSymlinks(prevBinSymlinks, new Set(addList.map(l => l.dstDir)));
     const binSymlinks = await createBinSymlinkMap(installState, locationTree, project.cwd, {loadManifest});
-    await persistBinSymlinks(prevBinSymlinks, binSymlinks, project.cwd, windowsLinkType);
+    await persistBinSymlinks(prevBinSymlinks, binSymlinks, project.cwd, windowsLinkType, dirCloneSlots.size > 0 && nmMode.value === NodeModulesMode.HARDLINKS_LOCAL ? getPackageCopies(installState) : null);
 
     await writeInstallState(project, installState, binSymlinks, nmMode, {installChangedByUser});
 
@@ -1393,10 +1437,21 @@ async function persistNodeModules(preinstallState: InstallState, installState: N
     }
   } finally {
     reportedProgress.stop();
+    dirCloner?.close();
   }
 }
 
-async function persistBinSymlinks(previousBinSymlinks: BinSymlinkMap, binSymlinks: BinSymlinkMap, projectCwd: PortablePath, windowsLinkType: WindowsLinkType) {
+// Locations sharing a source are the copies hardlinks-local would back with the same inodes
+function getPackageCopies(installState: NodeModulesLocatorMap): Map<PortablePath, Array<PortablePath>> {
+  const copiesBySource = new Map<PortablePath, Array<PortablePath>>();
+  for (const {target, linkType, locations} of installState.values())
+    if (linkType === LinkType.HARD)
+      miscUtils.getArrayWithDefault(copiesBySource, target).push(...locations);
+
+  return new Map([...copiesBySource.values()].flatMap(copies => copies.map(location => [location, copies])));
+}
+
+async function persistBinSymlinks(previousBinSymlinks: BinSymlinkMap, binSymlinks: BinSymlinkMap, projectCwd: PortablePath, windowsLinkType: WindowsLinkType, packageCopies: Map<PortablePath, Array<PortablePath>> | null) {
   // Delete outdated .bin folders
   for (const location of previousBinSymlinks.keys()) {
     if (ppath.contains(projectCwd, location) === null)
@@ -1437,6 +1492,16 @@ async function persistBinSymlinks(previousBinSymlinks: BinSymlinkMap, binSymlink
         await symlinkPromise(target, symlinkPath, windowsLinkType);
         if (ppath.contains(projectCwd, await xfs.realpathPromise(target)) !== null) {
           await xfs.chmodPromise(target, 0o755);
+          if (packageCopies !== null && target.split(ppath.sep).includes(NODE_MODULES)) {
+            // Cloned copies don't share inodes like hardlinked ones, so the mode has to reach each copy explicitly
+            const packageRoot = getLocationPackageRoot(target);
+            for (const copy of packageCopies.get(packageRoot) ?? []) {
+              const copyTarget = ppath.join(copy, ppath.relative(packageRoot, target));
+              if (copy !== packageRoot && await xfs.existsPromise(copyTarget)) {
+                await xfs.chmodPromise(copyTarget, 0o755);
+              }
+            }
+          }
         }
       }
     }

@@ -1,8 +1,10 @@
-import {Cache, Configuration, Project, ThrowReport, structUtils, LocatorHash, Package} from '@yarnpkg/core';
+import {Cache, Configuration, LocatorHash, Package, Project, ThrowReport, structUtils} from '@yarnpkg/core';
 import {Filename, PortablePath, ppath, xfs}                                            from '@yarnpkg/fslib';
 import LinkPlugin                                                                      from '@yarnpkg/plugin-link';
 import PnpPlugin                                                                       from '@yarnpkg/plugin-pnp';
 import v8                                                                              from 'v8';
+
+import {CorePlugin}                                                                    from '../sources/CorePlugin';
 
 import {TestPlugin}                                                                    from './TestPlugin';
 
@@ -15,6 +17,40 @@ const getConfiguration = (p: PortablePath) => {
 };
 
 describe(`Project`, () => {
+  it(`should default buildConcurrency to 4`, async () => {
+    await xfs.mktempPromise(async dir => {
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {});
+
+      const configuration = await getConfiguration(dir);
+
+      expect(configuration.get(`buildConcurrency`)).toEqual(4);
+    });
+  });
+
+  it(`should bound concurrent builds to the configured buildConcurrency`, async () => {
+    await xfs.mktempPromise(async dir => {
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {});
+
+      const configuration = await getConfiguration(dir);
+      configuration.use(`<test>`, {buildConcurrency: `2`}, dir, {overwrite: true});
+
+      let active = 0;
+      let peak = 0;
+      const limit = configuration.getLimit(`buildConcurrency`);
+
+      const task = () => limit(async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 5));
+        active -= 1;
+      });
+
+      await Promise.all(Array.from({length: 10}, () => task()));
+
+      expect(peak).toBeLessThanOrEqual(2);
+    });
+  });
+
   it(`should resolve virtual links during 'resolveEverything'`, async () => {
     await xfs.mktempPromise(async dir => {
       await xfs.mkdirpPromise(ppath.join(dir, `foo`));
@@ -235,6 +271,50 @@ describe(`Project`, () => {
   });
 
   // https://github.com/yarnpkg/berry/issues/3559
+  it(`should apply top-level resolutions pushed in place between two resolution passes`, async () => {
+    await xfs.mktempPromise(async dir => {
+      for (const name of [`foo1`, `foo2`] as Array<Filename>) {
+        await xfs.mkdirpPromise(ppath.join(dir, name));
+        await xfs.writeJsonPromise(ppath.join(dir, name, Filename.manifest), {
+          name: `foo`,
+          version: `1.0.0`,
+        });
+      }
+
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {
+        dependencies: {
+          [`foo`]: `portal:./foo1`,
+        },
+        resolutions: {
+          [`unrelated`]: `1.0.0`,
+        },
+      });
+
+      const configuration = Configuration.create(dir, dir, new Map([
+        [`@@core`, CorePlugin],
+        [`@yarnpkg/plugin-link`, LinkPlugin],
+      ]));
+
+      const {project} = await Project.find(configuration, dir);
+      const cache = await Cache.find(configuration);
+
+      const getFooReference = () => {
+        const descriptor = project.topLevelWorkspace.anchoredPackage.dependencies.get(structUtils.makeIdent(null, `foo`).identHash)!;
+        return project.storedPackages.get(project.storedResolutions.get(descriptor.descriptorHash)!)!.reference;
+      };
+
+      await project.resolveEverything({cache, report: new ThrowReport()});
+      expect(getFooReference()).toContain(`foo1`);
+
+      // Plugins (e.g. focus-style commands) may push resolutions into the very
+      // same array before running another resolution pass on the same project
+      project.topLevelWorkspace.manifest.resolutions.push({pattern: {descriptor: {fullName: `foo`}}, reference: `portal:./foo2`});
+
+      await project.resolveEverything({cache, report: new ThrowReport()});
+      expect(getFooReference()).toContain(`foo2`);
+    });
+  });
+
   it(`should preserve resolution dependencies when installing in lockfileOnly mode`, async () => {
     const checkProject = (project: Project) => {
       expect([...project.storedDescriptors.values()]).toStrictEqual(expect.arrayContaining([
