@@ -239,7 +239,7 @@ describe(`Project`, () => {
   // https://github.com/yarnpkg/berry/issues/3559
   it(`should apply top-level resolutions pushed in place between two resolution passes`, async () => {
     await xfs.mktempPromise(async dir => {
-      for (const name of [`foo1`, `foo2`]) {
+      for (const name of [`foo1`, `foo2`] as Array<Filename>) {
         await xfs.mkdirpPromise(ppath.join(dir, name));
         await xfs.writeJsonPromise(ppath.join(dir, name, Filename.manifest), {
           name: `foo`,
