@@ -34,6 +34,7 @@ import {YarnVersion}                                                    from './
 import {isFolderInside}                                                 from './folderUtils';
 import * as formatUtils                                                 from './formatUtils';
 import * as hashUtils                                                   from './hashUtils';
+import {makeMetadataCache}                                              from './installMetadata';
 import * as miscUtils                                                   from './miscUtils';
 import * as nodeUtils                                                   from './nodeUtils';
 import * as scriptUtils                                                 from './scriptUtils';
@@ -207,6 +208,9 @@ type RestoreInstallStateOpts = {
 
 // Just a type that's the union of all the fields declared in `INSTALL_STATE_FIELDS`
 type InstallState = Pick<Project, typeof INSTALL_STATE_FIELDS[keyof typeof INSTALL_STATE_FIELDS][number]>;
+
+const metadataFields = [...INSTALL_STATE_FIELDS.restoreLinkersCustomData, ...INSTALL_STATE_FIELDS.restoreBuildState];
+type InstallMetadata = Pick<InstallState, typeof metadataFields[number]>;
 
 export type PeerRequestNode = {
   requester: Locator;
@@ -2322,9 +2326,20 @@ export class Project {
     const installStatePath = this.configuration.get(`installStatePath`);
 
     await xfs.mkdirPromise(ppath.dirname(installStatePath), {recursive: true});
-    await xfs.writeFilePromise(installStatePath, await compress(serializedState) as Buffer);
+    const compressed = await compress(serializedState) as Buffer;
+    await xfs.writeFilePromise(installStatePath, compressed);
 
     this.installStateChecksum = newInstallStateChecksum;
+    const metadata = makeMetadataCache<InstallMetadata>(npath.fromPortablePath(installStatePath), compressed, INSTALL_STATE_VERSION);
+    await metadata.write({installStateChecksum: newInstallStateChecksum, state: pick(installState, metadataFields)});
+  }
+
+  private restoreInstallMetadata(state: InstallMetadata, {restoreLinkersCustomData, restoreBuildState}: RestoreInstallStateOpts) {
+    if (restoreLinkersCustomData && typeof state.linkersCustomData !== `undefined`)
+      this.linkersCustomData = state.linkersCustomData;
+
+    if (restoreBuildState)
+      Object.assign(this, pick(state, INSTALL_STATE_FIELDS.restoreBuildState));
   }
 
   async restoreInstallState({restoreLinkersCustomData = true, restoreResolutions = true, restoreBuildState = true}: RestoreInstallStateOpts = {}) {
@@ -2332,9 +2347,22 @@ export class Project {
 
     let installState: InstallState;
     try {
-      const installStateBuffer = await decompress(await xfs.readFilePromise(installStatePath)) as Buffer;
+      const compressed = await xfs.readFilePromise(installStatePath);
+      const metadata = !restoreResolutions
+        ? makeMetadataCache<InstallMetadata>(npath.fromPortablePath(installStatePath), compressed, INSTALL_STATE_VERSION)
+        : undefined;
+      const entry = await metadata?.read();
+      if (entry) {
+        this.installStateChecksum = entry.installStateChecksum;
+        this.restoreInstallMetadata(entry.state, {restoreLinkersCustomData, restoreBuildState});
+        return;
+      }
+
+      const installStateBuffer = await decompress(compressed) as Buffer;
       installState = v8.deserialize(installStateBuffer);
       this.installStateChecksum = hashUtils.makeHash(installStateBuffer);
+      if (metadata)
+        await metadata.write({installStateChecksum: this.installStateChecksum, state: pick(installState, metadataFields)});
     } catch {
       // If for whatever reason the install state can't be restored
       // carry on as if it doesn't exist.
@@ -2343,12 +2371,7 @@ export class Project {
       return;
     }
 
-    if (restoreLinkersCustomData)
-      if (typeof installState.linkersCustomData !== `undefined`)
-        this.linkersCustomData = installState.linkersCustomData;
-
-    if (restoreBuildState)
-      Object.assign(this, pick(installState, INSTALL_STATE_FIELDS.restoreBuildState));
+    this.restoreInstallMetadata(installState, {restoreLinkersCustomData, restoreBuildState});
 
     // Resolutions needs to be restored last otherwise applyLightResolution will persist a new state
     // before the rest is restored
