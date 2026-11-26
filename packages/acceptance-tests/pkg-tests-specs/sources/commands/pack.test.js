@@ -37,6 +37,17 @@ describe(`Commands`, () => {
     );
 
     test(
+      `it shouldn't pack the install state or its metadata at a custom path`,
+      makeTemporaryEnv({}, {installStatePath: `./state/install.gz`}, async ({path, run}) => {
+        await run(`install`);
+        expect(xfs.existsSync(`${path}/state/install.gz.metadata`)).toBe(true);
+        await fsUtils.writeFile(`${path}/state/package.metadata`, `package data`);
+
+        await expect(genPackList(run)).resolves.toEqual([`package.json`, `state/package.metadata`]);
+      }),
+    );
+
+    test(
       `it should only keep the files covered by the "files" field`,
       makeTemporaryEnv({
         files: [
