@@ -7,7 +7,7 @@ on:
         default: 'cherry-pick/'
 
 env:
-  node-version: '18.x'
+  node-version: '24.x'
 
 name: 'Release Branch'
 jobs:

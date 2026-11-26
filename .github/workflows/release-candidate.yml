@@ -7,7 +7,7 @@ on:
         default: '1'
 
 env:
-  node-version: '18.x'
+  node-version: '24.x'
 
 name: 'Release Candidate'
 jobs:
