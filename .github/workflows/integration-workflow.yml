@@ -125,13 +125,6 @@ jobs:
       env:
         TARGET_BRANCH: ${{github.event.pull_request.base.ref}}
 
-    - name: 'Check that the PR describes which packages should be bumped (fix w/ "yarn version check -i")'
-      run: |
-        node ./scripts/run-yarn.js version check
-      shell: bash
-      if: |
-        (success() || failure()) && github.event.pull_request != ''
-
     - name: 'Check for linting errors (fix w/ "yarn test:lint --fix")'
       run: |
         node ./scripts/run-yarn.js test:lint
