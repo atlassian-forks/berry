@@ -1,7 +1,7 @@
 on: [issues]
 
 env:
-  node-version: '18.x'
+  node-version: '24.x'
 
 name: 'Sherlock for Yarn'
 jobs:

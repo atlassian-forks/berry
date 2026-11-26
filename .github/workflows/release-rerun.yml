@@ -11,7 +11,7 @@ on:
         type: string
 
 env:
-  node-version: '18.x'
+  node-version: '24.x'
 
 name: 'Re-release'
 jobs:
