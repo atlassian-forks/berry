@@ -20,6 +20,38 @@ const VIRTUAL_ABBREVIATE = 5;
 const CONDITION_REGEX = /(os|cpu|libc)=([a-z0-9_-]+)/;
 const conditionParser = makeParser(CONDITION_REGEX);
 
+// Large projects create the same idents, descriptors and locators again and again (from the lockfile, the
+// manifests, while resolving and linking), and hashing them each time adds up to seconds. The hash only depends on
+// the two strings it's computed from (the cache keys are strings these structures already hold), and the cached hashes
+// are shared by all the structures that use them.
+const STRUCT_HASH_CACHE_SIZE = 1_000_000;
+const structHashCache = new Map<string, Map<string, string>>();
+let structHashCacheSize = 0;
+
+function makeStructHash<T extends string>(prefix: string | null, suffix: string): T {
+  const prefixKey = prefix ?? ``;
+
+  let hashes = structHashCache.get(prefixKey);
+  let hash = hashes?.get(suffix);
+
+  if (typeof hash === `undefined`) {
+    if (structHashCacheSize >= STRUCT_HASH_CACHE_SIZE) {
+      structHashCache.clear();
+      structHashCacheSize = 0;
+      hashes = undefined;
+    }
+
+    if (typeof hashes === `undefined`)
+      structHashCache.set(prefixKey, hashes = new Map());
+
+    hash = hashUtils.makeHash(prefix, suffix);
+    hashes.set(suffix, hash);
+    structHashCacheSize += 1;
+  }
+
+  return hash as T;
+}
+
 /**
  * Creates a package ident.
  *
@@ -30,7 +62,7 @@ export function makeIdent(scope: string | null, name: string): Ident {
   if (scope?.startsWith(`@`))
     throw new Error(`Invalid scope: don't prefix it with '@'`);
 
-  return {identHash: hashUtils.makeHash<IdentHash>(scope, name), scope, name};
+  return {identHash: makeStructHash<IdentHash>(scope, name), scope, name};
 }
 
 /**
@@ -40,7 +72,7 @@ export function makeIdent(scope: string | null, name: string): Ident {
  * @param range The range to attach (eg. `^1.0.0`)
  */
 export function makeDescriptor(ident: Ident, range: string): Descriptor {
-  return {identHash: ident.identHash, scope: ident.scope, name: ident.name, descriptorHash: hashUtils.makeHash<DescriptorHash>(ident.identHash, range), range};
+  return {identHash: ident.identHash, scope: ident.scope, name: ident.name, descriptorHash: makeStructHash<DescriptorHash>(ident.identHash, range), range};
 }
 
 /**
@@ -50,7 +82,7 @@ export function makeDescriptor(ident: Ident, range: string): Descriptor {
  * @param reference The reference to attach (eg. `1.0.0`)
  */
 export function makeLocator(ident: Ident, reference: string): Locator {
-  return {identHash: ident.identHash, scope: ident.scope, name: ident.name, locatorHash: hashUtils.makeHash<LocatorHash>(ident.identHash, reference), reference};
+  return {identHash: ident.identHash, scope: ident.scope, name: ident.name, locatorHash: makeStructHash<LocatorHash>(ident.identHash, reference), reference};
 }
 
 /**

@@ -1,10 +1,12 @@
-import {Cache, Configuration, Project, ThrowReport, structUtils, LocatorHash, Package} from '@yarnpkg/core';
-import {Filename, PortablePath, ppath, xfs}                                            from '@yarnpkg/fslib';
-import LinkPlugin                                                                      from '@yarnpkg/plugin-link';
-import PnpPlugin                                                                       from '@yarnpkg/plugin-pnp';
-import v8                                                                              from 'v8';
+import {Cache, Configuration, LocatorHash, Package, Project, ThrowReport, Workspace, structUtils} from '@yarnpkg/core';
+import {Filename, PortablePath, ppath, xfs}                                                       from '@yarnpkg/fslib';
+import LinkPlugin                                                                                 from '@yarnpkg/plugin-link';
+import PnpPlugin                                                                                  from '@yarnpkg/plugin-pnp';
+import v8                                                                                         from 'v8';
 
-import {TestPlugin}                                                                    from './TestPlugin';
+import {CorePlugin}                                                                               from '../sources/CorePlugin';
+
+import {TestPlugin}                                                                               from './TestPlugin';
 
 const getConfiguration = (p: PortablePath) => {
   return Configuration.create(p, p, new Map([
@@ -15,6 +17,40 @@ const getConfiguration = (p: PortablePath) => {
 };
 
 describe(`Project`, () => {
+  it(`should default buildConcurrency to 4`, async () => {
+    await xfs.mktempPromise(async dir => {
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {});
+
+      const configuration = await getConfiguration(dir);
+
+      expect(configuration.get(`buildConcurrency`)).toEqual(4);
+    });
+  });
+
+  it(`should bound concurrent builds to the configured buildConcurrency`, async () => {
+    await xfs.mktempPromise(async dir => {
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {});
+
+      const configuration = await getConfiguration(dir);
+      configuration.use(`<test>`, {buildConcurrency: `2`}, dir, {overwrite: true});
+
+      let active = 0;
+      let peak = 0;
+      const limit = configuration.getLimit(`buildConcurrency`);
+
+      const task = () => limit(async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 5));
+        active -= 1;
+      });
+
+      await Promise.all(Array.from({length: 10}, () => task()));
+
+      expect(peak).toBeLessThanOrEqual(2);
+    });
+  });
+
   it(`should resolve virtual links during 'resolveEverything'`, async () => {
     await xfs.mktempPromise(async dir => {
       await xfs.mkdirpPromise(ppath.join(dir, `foo`));
@@ -218,6 +254,116 @@ describe(`Project`, () => {
     });
   });
 
+  it(`should find the same workspaces from paths as from globs`, async () => {
+    await xfs.mktempPromise(async dir => {
+      const writeWorkspace = async (relativePath: string) => {
+        await xfs.mkdirpPromise(ppath.join(dir, relativePath as PortablePath));
+        await xfs.writeJsonPromise(ppath.join(dir, relativePath as PortablePath, Filename.manifest), {name: ppath.basename(relativePath as PortablePath)});
+      };
+
+      for (const name of [`a`, `b`, `c`, `nested/d`, `nested/e`, `node_modules/f`, `g`])
+        await writeWorkspace(`packages/${name}`);
+      await writeWorkspace(`elsewhere/h`);
+
+      await xfs.mkdirpPromise(ppath.join(dir, `packages/no-manifest` as PortablePath));
+      await xfs.writeFilePromise(ppath.join(dir, `packages/file` as PortablePath), ``);
+      await xfs.symlinkPromise(ppath.join(dir, `elsewhere/h` as PortablePath), ppath.join(dir, `packages/symlinked` as PortablePath));
+      await xfs.writeFilePromise(ppath.join(dir, Filename.lockfile), ``);
+
+      const getWorkspaces = async (workspaces: Array<string>) => {
+        await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {name: `root`, workspaces});
+        const {project} = await Project.find(getConfiguration(dir), dir);
+        return project.workspaces.map(workspace => workspace.relativeCwd);
+      };
+
+      const globs = await getWorkspaces([`packages/*`, `packages/nested/*`, `packages/node_modules/*`]);
+      expect(globs).toEqual([`.`, `packages/a`, `packages/b`, `packages/c`, `packages/g`, `packages/nested/d`, `packages/nested/e`, `packages/node_modules/f`, `packages/symlinked`]);
+
+      const paths = await getWorkspaces([`packages/c`, `packages/a`, `packages/nested/d`, `packages/b`, `packages/nested/e`, `packages/g`, `packages/symlinked`, `packages/a`, `packages/no-manifest`, `packages/file`, `packages/missing`, `packages/node_modules/f`]);
+      expect(paths).toEqual(globs);
+
+      // Paths that fast-glob normalizes are still sorted as they're written
+      const mixed = await getWorkspaces([`./packages/c`, `packages/a`, `packages/nested/*`, `packages/b`, `packages/nested/d`, `packages/g/`, `packages/symlinked`]);
+      expect(mixed).toEqual([`.`, `packages/c`, `packages/a`, `packages/b`, `packages/g`, `packages/nested/d`, `packages/nested/e`, `packages/symlinked`]);
+    });
+  });
+
+  it(`should find workspaces from paths like fast-glob does`, async () => {
+    await xfs.mktempPromise(async dir => {
+      const writeWorkspace = async (relativePath: string, workspaces?: Array<string>) => {
+        await xfs.mkdirpPromise(ppath.join(dir, relativePath as PortablePath));
+        await xfs.writeJsonPromise(ppath.join(dir, relativePath as PortablePath, Filename.manifest), {name: ppath.basename(relativePath as PortablePath).replace(/[^a-z]/g, ``) || `x`, workspaces});
+      };
+
+      await writeWorkspace(`shared/a`);
+      await writeWorkspace(`shared/b`);
+      await writeWorkspace(`shared/f(o)o`);
+      await xfs.writeFilePromise(ppath.join(dir, Filename.lockfile), ``);
+
+      const getWorkspaces = async (workspaces: Array<string>) => {
+        await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {name: `root`, workspaces});
+        const {project} = await Project.find(getConfiguration(dir), dir);
+        return project.workspaces.map(workspace => workspace.relativeCwd);
+      };
+
+      // Negated patterns apply to paths too
+      await expect(getWorkspaces([`shared/a`, `shared/b`, `!shared/b`])).resolves.toEqual([`.`, `shared/a`]);
+
+      // Names that fast-glob reads as patterns
+      await expect(getWorkspaces([`shared/f(o)o`])).resolves.toEqual([`.`]);
+
+      // Paths reaching out of a nested workspace
+      await writeWorkspace(`product`, [`../shared/a`, `../shared/b`]);
+      await expect(getWorkspaces([`product`])).resolves.toEqual([`.`, `product`, `shared/a`, `shared/b`]);
+    });
+  });
+
+  it(`should give a folder listed by a workspace and one of its descendants to the workspace`, async () => {
+    await xfs.mktempPromise(async dir => {
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {name: `root`, workspaces: [`a`, `shared`]});
+      await xfs.writeFilePromise(ppath.join(dir, Filename.lockfile), ``);
+      await xfs.mkdirpPromise(ppath.join(dir, `a` as PortablePath));
+      await xfs.writeJsonPromise(ppath.join(dir, `a`, Filename.manifest), {name: `a`, workspaces: [`../shared`, `x`]});
+      for (const name of [`shared`, `a/x`]) {
+        await xfs.mkdirpPromise(ppath.join(dir, name as PortablePath));
+        await xfs.writeJsonPromise(ppath.join(dir, name as PortablePath, Filename.manifest), {name: ppath.basename(name as PortablePath)});
+      }
+
+      const {project} = await Project.find(getConfiguration(dir), dir);
+      expect(project.workspaces.map(workspace => workspace.relativeCwd)).toEqual([`.`, `a`, `a/x`, `shared`]);
+    });
+  });
+
+  it(`should give a folder listed by several workspaces to the first of them, whichever is set up first`, async () => {
+    await xfs.mktempPromise(async dir => {
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {name: `root`, workspaces: [`a`, `b`]});
+      await xfs.writeFilePromise(ppath.join(dir, Filename.lockfile), ``);
+      for (const name of [`a`, `b`]) {
+        await xfs.mkdirpPromise(ppath.join(dir, name as Filename));
+        await xfs.writeJsonPromise(ppath.join(dir, name as Filename, Filename.manifest), {name, workspaces: [`../shared`]});
+      }
+      await xfs.mkdirpPromise(ppath.join(dir, `shared`));
+      await xfs.writeJsonPromise(ppath.join(dir, `shared`, Filename.manifest), {name: `shared`});
+
+      // `a` comes first but finishes its setup last
+      const setup = Workspace.prototype.setup;
+      const spy = jest.spyOn(Workspace.prototype, `setup`).mockImplementation(async function (this: Workspace) {
+        if (ppath.basename(this.cwd) === `a`)
+          await new Promise(resolve => setTimeout(resolve, 50));
+        return setup.call(this);
+      });
+
+      try {
+        const configuration = getConfiguration(dir);
+        const {project} = await Project.find(configuration, dir);
+
+        expect(project.workspaces.map(workspace => workspace.manifest.raw.name)).toEqual([`root`, `a`, `shared`, `b`]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   it(`should update Manifest.raw when persisting a workspace`, async () => {
     await xfs.mktempPromise(async path => {
       await xfs.writeJsonPromise(ppath.join(path, Filename.manifest), {name: `foo`});
@@ -235,6 +381,50 @@ describe(`Project`, () => {
   });
 
   // https://github.com/yarnpkg/berry/issues/3559
+  it(`should apply top-level resolutions pushed in place between two resolution passes`, async () => {
+    await xfs.mktempPromise(async dir => {
+      for (const name of [`foo1`, `foo2`] as Array<Filename>) {
+        await xfs.mkdirpPromise(ppath.join(dir, name));
+        await xfs.writeJsonPromise(ppath.join(dir, name, Filename.manifest), {
+          name: `foo`,
+          version: `1.0.0`,
+        });
+      }
+
+      await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {
+        dependencies: {
+          [`foo`]: `portal:./foo1`,
+        },
+        resolutions: {
+          [`unrelated`]: `1.0.0`,
+        },
+      });
+
+      const configuration = Configuration.create(dir, dir, new Map([
+        [`@@core`, CorePlugin],
+        [`@yarnpkg/plugin-link`, LinkPlugin],
+      ]));
+
+      const {project} = await Project.find(configuration, dir);
+      const cache = await Cache.find(configuration);
+
+      const getFooReference = () => {
+        const descriptor = project.topLevelWorkspace.anchoredPackage.dependencies.get(structUtils.makeIdent(null, `foo`).identHash)!;
+        return project.storedPackages.get(project.storedResolutions.get(descriptor.descriptorHash)!)!.reference;
+      };
+
+      await project.resolveEverything({cache, report: new ThrowReport()});
+      expect(getFooReference()).toContain(`foo1`);
+
+      // Plugins (e.g. focus-style commands) may push resolutions into the very
+      // same array before running another resolution pass on the same project
+      project.topLevelWorkspace.manifest.resolutions.push({pattern: {descriptor: {fullName: `foo`}}, reference: `portal:./foo2`});
+
+      await project.resolveEverything({cache, report: new ThrowReport()});
+      expect(getFooReference()).toContain(`foo2`);
+    });
+  });
+
   it(`should preserve resolution dependencies when installing in lockfileOnly mode`, async () => {
     const checkProject = (project: Project) => {
       expect([...project.storedDescriptors.values()]).toStrictEqual(expect.arrayContaining([

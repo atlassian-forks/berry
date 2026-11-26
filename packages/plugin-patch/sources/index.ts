@@ -1,4 +1,5 @@
 import {Plugin, Project, SettingsType} from '@yarnpkg/core';
+import {Hooks as CoreHooks}            from '@yarnpkg/core';
 import {PortablePath}                  from '@yarnpkg/fslib';
 
 import {PatchFetcher}                  from './PatchFetcher';
@@ -32,7 +33,15 @@ declare module '@yarnpkg/core' {
   }
 }
 
-const plugin: Plugin = {
+const plugin: Plugin<CoreHooks> = {
+  hooks: {
+    getUpToDateKeyPart: async (project, locator) => {
+      if (!locator.reference.startsWith(`patch:`))
+        return undefined;
+
+      return await patchUtils.getUpToDateKeyPart(project, locator);
+    },
+  },
   configuration: {
     enableInlineHunks: {
       description: `If true, the installs will print unmatched patch hunks`,

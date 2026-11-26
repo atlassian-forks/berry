@@ -122,6 +122,34 @@ export interface Hooks {
   ) => Promise<Descriptor>;
 
   /**
+   * Called at the start of an install when none of its inputs (lockfile,
+   * manifests, configuration, Yarn and Node versions) changed since the last
+   * install that fully succeeded. Starts with `null`; the plugin of the
+   * active linker sets it to `true` if the artifacts it wrote are still
+   * intact, and the install only stops there if it's `true` in the end. Any
+   * plugin can set it to `false`, and must then keep it `false`.
+   */
+  isInstallUpToDate?: (
+    upToDate: boolean | null,
+    project: Project,
+    options: InstallOptions,
+  ) => Promise<boolean | null>;
+
+  /**
+   * Called when computing the key that decides whether an install can be
+   * skipped (see `isInstallUpToDate`), for each package that comes neither
+   * from the npm registry nor from a workspace. The plugin that handles the
+   * package returns a string that changes whenever installing it could give
+   * a different result (for instance the content of its patch files), or
+   * `null` if it can't tell. Installs that involve a package that no plugin
+   * vouches for are never skipped.
+   */
+  getUpToDateKeyPart?: (
+    project: Project,
+    locator: Locator,
+  ) => Promise<string | null | void>;
+
+  /**
    * Called after the `install` method from the `Project` class successfully
    * completed.
    */

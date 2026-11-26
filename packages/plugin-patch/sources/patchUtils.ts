@@ -137,6 +137,44 @@ function visitPatchPath<T>({onAbsolute, onRelative, onProject, onBuiltin}: Visit
   }
 }
 
+/**
+ * What applying the patches of a locator depends on (the content of the patch
+ * files), for deciding whether an install can be skipped. Returns null when it
+ * can't be told without fetching other packages.
+ */
+export async function getUpToDateKeyPart(project: Project, locator: Locator) {
+  const {parentLocator, sourceLocator, patchPaths} = parseLocator(locator);
+
+  // The patched package must itself be immutable
+  if (!sourceLocator.reference.startsWith(`npm:`))
+    return null;
+
+  // Relative paths are resolved from the package that declared the patch, which we can only read here if it's a workspace
+  const parentWorkspace = parentLocator !== null ? project.tryWorkspaceByLocator(parentLocator) : null;
+
+  const readPatchFile = async (path: PortablePath) => {
+    return await xfs.readFilePromise(path, `utf8`).catch(() => `<missing>`);
+  };
+
+  const parts = [structUtils.stringifyLocator(locator)];
+  for (const patchPath of patchPaths) {
+    const part = await visitPatchPath<Promise<string | null>>({
+      // Builtin patches only change along with Yarn itself
+      onBuiltin: async () => ``,
+      onProject: async path => await readPatchFile(ppath.join(project.cwd, path)),
+      onAbsolute: async path => await readPatchFile(path),
+      onRelative: async path => parentWorkspace !== null ? await readPatchFile(ppath.join(parentWorkspace.cwd, path)) : null,
+    }, patchPath);
+
+    if (part === null)
+      return null;
+
+    parts.push(patchPath, part);
+  }
+
+  return parts.join(`\0`);
+}
+
 export function extractPatchFlags(patchPath: PortablePath) {
   const flagIndex = patchPath.lastIndexOf(`!`);
 

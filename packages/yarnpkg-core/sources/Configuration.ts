@@ -454,6 +454,11 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     type: SettingsType.NUMBER,
     default: nodeUtils.availableParallelism(),
   },
+  buildConcurrency: {
+    description: `Maximal amount of concurrent package builds`,
+    type: SettingsType.NUMBER,
+    default: 4,
+  },
   taskPoolMode: {
     description: `Execution strategy for heavy tasks`,
     type: SettingsType.STRING,
@@ -710,6 +715,7 @@ export interface ConfigurationValueMap {
   enableStrictSsl: boolean;
   taskPoolConcurrency: number;
   taskPoolMode: string;
+  buildConcurrency: number;
 
   logFilters: Array<miscUtils.ToMapValue<{code?: string, text?: string, pattern?: string, level?: formatUtils.LogLevel | null}>>;
 
@@ -1110,6 +1116,11 @@ export class Configuration {
 
   public plugins: Map<string, Plugin> = new Map();
 
+  /**
+   * The files the third-party plugins were loaded from.
+   */
+  public pluginPaths: Map<string, PortablePath> = new Map();
+
   public settings: Map<string, SettingsDefinition> = new Map();
   public values: Map<string, any> = new Map();
   public sources: Map<string, string> = new Map();
@@ -1340,6 +1351,7 @@ export class Configuration {
 
         dynamicPlugins.add(name);
         thirdPartyPlugins.set(name, plugin);
+        configuration.pluginPaths.set(name, pluginPath);
       };
 
       if (environmentSettings.plugins) {

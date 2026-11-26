@@ -105,6 +105,7 @@ export default class WorkspacesFocusCommand extends BaseCommand {
     }, {
       cache,
       persistProject: false,
+      skipIfUpToDate: true,
     });
   }
 }

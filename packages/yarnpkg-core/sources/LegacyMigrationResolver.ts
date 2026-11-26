@@ -43,6 +43,11 @@ export class LegacyMigrationResolver implements Resolver {
     if (!xfs.existsSync(lockfilePath))
       return;
 
+    // Nor if the project already found it to be a modern one (it records -1 for v1 lockfiles), which saves parsing
+    // it a second time
+    if (project.lockfileLastVersion !== null && project.lockfileLastVersion !== -1)
+      return;
+
     const content = await xfs.readFilePromise(lockfilePath, `utf8`);
     const parsed = parseSyml(content);
 

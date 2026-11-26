@@ -1357,17 +1357,17 @@ describe(`Node_Modules`, () => {
           },
         });
 
-        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: hardlinks-local\n`);
+        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: hardlinks-local\nnmDirClone: false\n`);
         await run(`install`);
 
         expect(await xfs.statPromise(`${path}/ws3/node_modules/no-deps/package.json` as PortablePath)).toMatchObject({nlink: 2});
 
-        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: classic\n`);
+        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: classic\nnmDirClone: false\n`);
         await run(`install`);
 
         expect(await xfs.statPromise(`${path}/ws3/node_modules/no-deps/package.json` as PortablePath)).toMatchObject({nlink: 1});
 
-        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: hardlinks-local\n`);
+        await writeFile(`${path}/.yarnrc.yml`, `nodeLinker: node-modules\nnmMode: hardlinks-local\nnmDirClone: false\n`);
         await run(`install`);
 
         expect(await xfs.statPromise(`${path}/ws3/node_modules/no-deps/package.json` as PortablePath)).toMatchObject({nlink: 2});
@@ -1482,6 +1482,134 @@ describe(`Node_Modules`, () => {
 
         const depContent = await xfs.readFilePromise(depNmPath, `utf8`);
         expect(depContent).toEqual(originalContent);
+      },
+    ),
+  );
+
+  test(`should record the verified mtime of store files whose recorded mtime is stale in nmMode: hardlinks-global`,
+    makeTemporaryEnv(
+      {
+        dependencies: {
+          [`no-deps`]: `1.0.0`,
+        },
+      },
+      {
+        nodeLinker: `node-modules`,
+        nmMode: `hardlinks-global`,
+      },
+      async ({path, run}) => {
+        await run(`install`);
+
+        const storeDir = ppath.join(path, `.yarn/global/store/v1` as PortablePath);
+        const indexFiles: Array<PortablePath> = [];
+        for (const bucket of await xfs.readdirPromise(storeDir))
+          for (const entry of await xfs.readdirPromise(ppath.join(storeDir, bucket)))
+            if (entry.endsWith(`.json`))
+              indexFiles.push(ppath.join(storeDir, bucket, entry));
+
+        expect(indexFiles).toHaveLength(1);
+
+        const index = JSON.parse(await xfs.readFilePromise(indexFiles[0], `utf8`));
+        index[`index.js`].mtimeMs = 1;
+        await xfs.writeFilePromise(indexFiles[0], JSON.stringify(index));
+
+        await xfs.removePromise(ppath.join(path, `node_modules`));
+        await run(`install`);
+
+        const repairedIndex = JSON.parse(await xfs.readFilePromise(indexFiles[0], `utf8`));
+        const contentFile = ppath.join(storeDir, repairedIndex[`index.js`].digest.substring(0, 2), `${repairedIndex[`index.js`].digest.substring(2)}.dat`);
+        expect(repairedIndex[`index.js`].mtimeMs).toEqual(Math.ceil((await xfs.statPromise(contentFile)).mtimeMs));
+        expect(await xfs.readFilePromise(ppath.join(path, `node_modules/no-deps/index.js`), `utf8`)).toEqual(await xfs.readFilePromise(contentFile, `utf8`));
+      },
+    ),
+  );
+
+  test(`should read the bins of packages from the global store, and never from a manifest modified through node_modules, in nmMode: hardlinks-global`,
+    makeTemporaryEnv(
+      {
+        dependencies: {
+          [`has-bin-entries`]: `1.0.0`,
+        },
+      },
+      {
+        nodeLinker: `node-modules`,
+        nmMode: `hardlinks-global`,
+      },
+      async ({path, run}) => {
+        const binPath = ppath.join(path, `node_modules/.bin/has-bin-entries` as PortablePath);
+        const manifestPath = ppath.join(path, `node_modules/has-bin-entries/package.json` as PortablePath);
+        const storeDir = ppath.join(path, `.yarn/global/store/v1` as PortablePath);
+
+        // Like a fresh checkout: without an install state, the manifests have to be read again
+        const reinstall = async () => {
+          await xfs.removePromise(ppath.join(path, Filename.nodeModules));
+          await xfs.removePromise(ppath.join(path, `.yarn/install-state.gz` as PortablePath));
+          await run(`install`);
+        };
+
+        const countPackageDataFiles = async () => {
+          let count = 0;
+          for (const bucket of await xfs.readdirPromise(storeDir))
+            for (const entry of await xfs.readdirPromise(ppath.join(storeDir, bucket)))
+              if (entry.endsWith(`.pkgdata`))
+                count += 1;
+
+          return count;
+        };
+
+        await run(`install`);
+        await expect(countPackageDataFiles()).resolves.toEqual(0);
+
+        // Editing the manifest in node_modules edits the store too, before anything was read from it
+        const manifest = await xfs.readJsonPromise(manifestPath);
+        delete manifest.bin;
+        await xfs.writeFilePromise(manifestPath, JSON.stringify(manifest));
+
+        for (let t = 0; t < 3; ++t) {
+          await reinstall();
+          await expect(xfs.existsPromise(binPath)).resolves.toEqual(true);
+          await expect(xfs.readJsonPromise(manifestPath)).resolves.toHaveProperty([`bin`, `has-bin-entries`]);
+        }
+
+        // Both packages were eventually read from the store
+        await expect(countPackageDataFiles()).resolves.toEqual(2);
+      },
+    ),
+  );
+
+  test(`should index conditional packages in the global store in nmMode: hardlinks-global`,
+    makeTemporaryEnv(
+      {
+        dependencies: {
+          [`optional-native`]: `1.0.0`,
+        },
+      },
+      async ({path, run}) => {
+        await xfs.writeJsonPromise(ppath.join(path, Filename.rc), {
+          nodeLinker: `node-modules`,
+          nmMode: `hardlinks-global`,
+          supportedArchitectures: {os: [`foo`], cpu: [`x64`]},
+        });
+
+        await run(`install`);
+
+        const storeDir = ppath.join(path, `.yarn/global/store/v1` as PortablePath);
+        const indexFiles: Array<PortablePath> = [];
+        for (const bucket of await xfs.readdirPromise(storeDir))
+          for (const entry of await xfs.readdirPromise(ppath.join(storeDir, bucket)))
+            if (entry.endsWith(`.json`))
+              indexFiles.push(ppath.join(storeDir, bucket, entry));
+
+        // optional-native itself, plus each installed conditional package (those have no checksum)
+        const installedNatives = (await xfs.readdirPromise(ppath.join(path, Filename.nodeModules))).filter(entry => entry.startsWith(`native-`));
+        expect(installedNatives).toContain(`native-foo-x64`);
+        expect(indexFiles).toHaveLength(1 + installedNatives.length);
+
+        await xfs.removePromise(ppath.join(path, `node_modules`));
+        await run(`install`);
+
+        expect(JSON.parse(await xfs.readFilePromise(ppath.join(path, `node_modules/native-foo-x64/package.json`), `utf8`))).toMatchObject({name: `native-foo-x64`});
+        await expect(xfs.readdirPromise(ppath.join(path, Filename.nodeModules))).resolves.not.toContain(`native-bar-x64`);
       },
     ),
   );

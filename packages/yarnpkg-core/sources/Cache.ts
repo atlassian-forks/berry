@@ -277,9 +277,35 @@ export class Cache {
         ? splitChecksumComponents(expectedChecksum).cacheKey
         : this.cacheKey;
 
-      const actualChecksum = (!opts.skipIntegrityCheck || !expectedChecksum)
+      // Global cache archives that matched their checksum get a stamp binding that checksum to the archive's
+      // identity, so later installs only stat them; writing to an archive always moves its ctime, which voids the stamp
+      const stampPath = expectedChecksum !== null && controlPath === null && !isColdHit && !opts.skipIntegrityCheck && this.configuration.get(`enableGlobalCache`)
+        ? ppath.join(this.cwd, `.verified` as Filename, ppath.basename(path))
+        : null;
+
+      const archiveStat = stampPath !== null
+        ? await xfs.statPromise(path, {bigint: true}).catch(() => null)
+        : null;
+
+      const stamp = archiveStat !== null
+        ? `${expectedChecksum}\n${archiveStat.dev}:${archiveStat.ino}:${archiveStat.size}:${archiveStat.mtimeNs}:${archiveStat.ctimeNs}\n`
+        : null;
+
+      const isVerified = stamp !== null
+        && await xfs.readFilePromise(stampPath!, `utf8`).then(content => content === stamp, () => false);
+
+      const actualChecksum = (!opts.skipIntegrityCheck || !expectedChecksum) && !isVerified
         ? `${actualCacheKey}/${await hashUtils.checksumFile(path)}`
-        : expectedChecksum;
+        : expectedChecksum!;
+
+      // Immutable caches can still be trusted from their stamps, but they don't get new ones
+      if (stamp !== null && !isVerified && actualChecksum === expectedChecksum && !this.immutable) {
+        const stampPathTemp = `${stampPath}${this.cacheId}` as PortablePath;
+        await xfs.mkdirPromise(ppath.dirname(stampPath!), {recursive: true})
+          .then(() => xfs.writeFilePromise(stampPathTemp, stamp))
+          .then(() => xfs.renamePromise(stampPathTemp, stampPath!))
+          .catch(() => xfs.removePromise(stampPathTemp).catch(() => {}));
+      }
 
       if (controlPath !== null) {
         const previousChecksum = (!opts.skipIntegrityCheck || !expectedChecksum)

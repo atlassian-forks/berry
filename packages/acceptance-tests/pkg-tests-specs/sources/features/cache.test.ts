@@ -82,6 +82,49 @@ describe(`Cache`, () => {
 
 
   test(
+    `it should detect an archive modified after it was verified, even if its mtime is restored (global cache)`,
+    makeTemporaryEnv({
+      dependencies: {
+        [`no-deps`]: `1.0.0`,
+      },
+    }, {
+      enableGlobalCache: true,
+    }, async ({path, run, source}) => {
+      await run(`install`);
+      // The second install verifies the archive against the lockfile and stamps it
+      await run(`install`);
+
+      const cacheDir = ppath.join(path, `.yarn/global/cache`);
+      const cacheFile = ppath.join(cacheDir, (await xfs.readdirPromise(cacheDir)).find(name => name.startsWith(`no-deps-`))!);
+      expect(xfs.existsSync(ppath.join(cacheDir, `.verified`, ppath.basename(cacheFile)))).toEqual(true);
+
+      const {atime, mtime} = await xfs.statPromise(cacheFile);
+      const content = await xfs.readFilePromise(cacheFile);
+      content[content.length - 1] ^= 1;
+      await xfs.writeFilePromise(cacheFile, content);
+      await xfs.utimesPromise(cacheFile, atime, mtime);
+
+      await expect(run(`install`)).rejects.toThrow(/YN0018/);
+    }),
+  );
+
+  test(
+    `it should not write verification stamps into a local cache`,
+    makeTemporaryEnv({
+      dependencies: {
+        [`no-deps`]: `1.0.0`,
+      },
+    }, {
+      enableGlobalCache: false,
+    }, async ({path, run, source}) => {
+      await run(`install`);
+      await run(`install`);
+
+      expect(xfs.existsSync(ppath.join(path, `.yarn/cache/.verified`))).toEqual(false);
+    }),
+  );
+
+  test(
     `it should refetch archive when YARN_CHECKSUM_BEHAVIOR=reset and the files checksum is incorrect`,
     makeTemporaryEnv({
       dependencies: {

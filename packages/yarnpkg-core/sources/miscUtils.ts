@@ -335,6 +335,14 @@ export class DefaultStream extends Transform {
 
 const realRequire: NodeRequire = eval(`require`);
 
+/**
+ * The files of the modules loaded so far: Yarn itself, its plugins, and what
+ * they required.
+ */
+export function getLoadedModulePaths(): Array<string> {
+  return Object.keys(realRequire.cache).filter(modulePath => npath.isAbsolute(modulePath));
+}
+
 function dynamicRequireNode(path: string) {
   return realRequire(npath.fromPortablePath(path));
 }

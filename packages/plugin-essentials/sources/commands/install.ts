@@ -377,7 +377,7 @@ export default class YarnCommand extends BaseCommand {
       includeLogs: true,
       includeVersion: true,
     }, async report => {
-      await project.install({cache, report, immutable, checkResolutions, mode: this.mode});
+      await project.install({cache, report, immutable, checkResolutions, mode: this.mode, skipIfUpToDate: true});
     });
 
     return report.exitCode();
