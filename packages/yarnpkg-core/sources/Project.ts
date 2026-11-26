@@ -2338,8 +2338,9 @@ export class Project {
     if (restoreLinkersCustomData && typeof state.linkersCustomData !== `undefined`)
       this.linkersCustomData = state.linkersCustomData;
 
-    if (restoreBuildState)
+    if (restoreBuildState) {
       Object.assign(this, pick(state, INSTALL_STATE_FIELDS.restoreBuildState));
+    }
   }
 
   async restoreInstallState({restoreLinkersCustomData = true, restoreResolutions = true, restoreBuildState = true}: RestoreInstallStateOpts = {}) {
@@ -2361,8 +2362,9 @@ export class Project {
       const installStateBuffer = await decompress(compressed) as Buffer;
       installState = v8.deserialize(installStateBuffer);
       this.installStateChecksum = hashUtils.makeHash(installStateBuffer);
-      if (metadata)
+      if (metadata) {
         await metadata.write({installStateChecksum: this.installStateChecksum, state: pick(installState, metadataFields)});
+      }
     } catch {
       // If for whatever reason the install state can't be restored
       // carry on as if it doesn't exist.
