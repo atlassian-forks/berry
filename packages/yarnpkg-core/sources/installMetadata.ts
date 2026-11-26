@@ -25,19 +25,19 @@ export function makeMetadataCache<T>(statePath: string, compressedState: Buffer,
         const payloadOffset = digestOffset + digestSize;
 
         if (data.length <= payloadOffset || !data.subarray(0, sourceOffset).equals(signature))
-          return;
+          return undefined;
         if (!data.subarray(sourceOffset, digestOffset).equals(getSourceDigest()))
-          return;
+          return undefined;
 
         const payload = data.subarray(payloadOffset);
         if (!data.subarray(digestOffset, payloadOffset).equals(digest(payload)))
-          return;
+          return undefined;
 
         const entry = v8.deserialize(payload);
         if (typeof entry?.installStateChecksum !== `string` || !/^[a-f0-9]{128}$/.test(entry.installStateChecksum))
-          return;
+          return undefined;
         if (!entry.state || typeof entry.state !== `object`)
-          return;
+          return undefined;
 
         return entry;
       } catch {
@@ -64,8 +64,9 @@ export function makeMetadataCache<T>(statePath: string, compressedState: Buffer,
       } catch {
         // A read-only checkout can always use the full install state.
       } finally {
-        if (created)
+        if (created) {
           await unlink(temporaryPath).catch(() => {});
+        }
       }
     },
   };
