@@ -474,6 +474,87 @@ describe(`Project`, () => {
     });
   });
 
+  describe(`partial install state`, () => {
+    const locatorHash = structUtils.makeLocator(structUtils.makeIdent(null, `pkg`), `npm:1.0.0`).locatorHash;
+
+    async function persistExample(dir: PortablePath) {
+      const configuration = await getConfiguration(dir);
+      const project = new Project(dir, {configuration});
+      project.storedBuildState.set(locatorHash, `first build`);
+      project.linkersCustomData.set(`linker`, `custom data`);
+      project.accessibleLocators.add(locatorHash);
+      await project.persistInstallStateFile();
+
+      const metadataPath = `${configuration.get(`installStatePath`)}.metadata` as PortablePath;
+      return {configuration, project, metadataPath};
+    }
+
+    it(`should read only the requested fields from matching metadata`, async () => {
+      await xfs.mktempPromise(async dir => {
+        const {configuration, project} = await persistExample(dir);
+        const reader = new Project(dir, {configuration});
+        const deserialize = jest.spyOn(v8, `deserialize`);
+        try {
+          await reader.restoreInstallState({restoreResolutions: false, restoreLinkersCustomData: false});
+          expect(deserialize).toHaveBeenCalledTimes(1);
+          expect(deserialize.mock.results[0].value).toHaveProperty(`installStateChecksum`, project.installStateChecksum);
+        } finally {
+          deserialize.mockRestore();
+        }
+
+        expect(reader.installStateChecksum).toBe(project.installStateChecksum);
+        expect(reader.storedBuildState.get(locatorHash)).toBe(`first build`);
+        expect(reader.linkersCustomData.size).toBe(0);
+        expect(reader.accessibleLocators.size).toBe(0);
+
+        reader.storedBuildState.clear();
+        await reader.restoreInstallState({restoreResolutions: false, restoreBuildState: false});
+        expect(reader.linkersCustomData.get(`linker`)).toBe(`custom data`);
+        expect(reader.storedBuildState.size).toBe(0);
+
+        await reader.restoreInstallState();
+        expect(reader.accessibleLocators.has(locatorHash)).toBe(true);
+      });
+    });
+
+    it.each([`missing`, `corrupt`, `stale`])(`should recover from %s metadata`, async kind => {
+      await xfs.mktempPromise(async dir => {
+        const {configuration, project, metadataPath} = await persistExample(dir);
+        const oldMetadata = await xfs.readFilePromise(metadataPath);
+        project.storedBuildState.set(locatorHash, `second build`);
+        await project.persistInstallStateFile();
+        const validMetadata = await xfs.readFilePromise(metadataPath);
+
+        if (kind === `missing`) {
+          await xfs.unlinkPromise(metadataPath);
+        } else if (kind === `stale`) {
+          await xfs.writeFilePromise(metadataPath, oldMetadata);
+        } else {
+          const corrupt = Buffer.from(validMetadata);
+          corrupt[corrupt.length - 1] ^= 0xff;
+          await xfs.writeFilePromise(metadataPath, corrupt);
+        }
+
+        const reader = new Project(dir, {configuration});
+        await reader.restoreInstallState({restoreResolutions: false});
+        expect(reader.storedBuildState.get(locatorHash)).toBe(`second build`);
+        expect(reader.installStateChecksum).toBe(project.installStateChecksum);
+        expect(await xfs.readFilePromise(metadataPath)).toEqual(validMetadata);
+      });
+    });
+
+    it(`should still restore build state when metadata cannot be written`, async () => {
+      await xfs.mktempPromise(async dir => {
+        const {configuration, metadataPath} = await persistExample(dir);
+        await xfs.unlinkPromise(metadataPath);
+        await xfs.mkdirPromise(metadataPath);
+        const reader = new Project(dir, {configuration});
+        await reader.restoreInstallState({restoreResolutions: false});
+        expect(reader.storedBuildState.get(locatorHash)).toBe(`first build`);
+      });
+    });
+  });
+
   it(`should recover from a corrupted install state`, async() => {
     await xfs.mktempPromise(async dir => {
       await xfs.writeJsonPromise(ppath.join(dir, Filename.manifest), {name: `foo`});

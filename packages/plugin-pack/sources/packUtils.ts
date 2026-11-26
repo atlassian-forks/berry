@@ -184,7 +184,9 @@ export async function genPackList(workspace: Workspace) {
 
   maybeRejectPath(configuration.get(`cacheFolder`));
   maybeRejectPath(configuration.get(`globalFolder`));
-  maybeRejectPath(configuration.get(`installStatePath`));
+  const installStatePath = configuration.get(`installStatePath`);
+  maybeRejectPath(installStatePath);
+  maybeRejectPath(`${installStatePath}.metadata` as PortablePath);
   maybeRejectPath(configuration.get(`virtualFolder`));
   maybeRejectPath(configuration.get(`yarnPath`));
 
